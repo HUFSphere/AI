@@ -43,9 +43,18 @@ GitHub·Notion·Figma 협업 기록(chunk)을 임베딩해 인메모리에 저�
 | 3 | `POST /ask` | question·lang만 받아 내부에서 검색 + 답변 생성까지 한 번에 |
 | 4 | `POST /qna` | chunk를 직접 받아 답변만 생성 (기존 구현, 검색 없음) |
 | 5 | `POST /ingest/github` | 공개 GitHub 레포의 최근 PR을 긁어와 chunk로 만들어 `/index`와 동일하게 저장 |
+| 6 | `POST /ingest/notion` | Notion 페이지 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
+| 7 | `POST /ingest/figma` | Figma 코멘트 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
 
 `/ask`와 `/qna`는 같은 답변 생성 로직(`generate_answer`)을 공유한다 — 근거 안에서만 답하고,
 없으면 모른다고 `lang`으로 답하며, 실제로 사용한 근거만 `sources`로 반환하는 규칙은 동일하다.
+
+> **AI 서버 구현 vs BE 연동 상태.** `/ingest/notion`, `/ingest/figma`는 이 AI 서버에는 이미 구현되어
+> 있다(4~7행). 다만 [BE](https://github.com/HUFSphere/BE)가 아직 이 두 엔드포인트를 호출하도록
+> 연동되어 있지 않아서, BE에 Notion/Figma를 소스로 등록하면 BE가 400을 반환한다 — 이건 BE 쪽 미연동
+> 문제이지 AI 서버가 안 만들어진 게 아니다. GitHub 파이프라인(`/ingest/github`)만 BE↔AI 전체 흐름이
+> 실제로 연동·검증되어 있다(`pypa/sampleproject`로 2026-08-11 e2e 테스트 통과 — 아래 "테스트 흐름:
+> GitHub 레포 자동 수집 → ask" 참고).
 
 ## 실행 방법
 
@@ -196,3 +205,5 @@ Post-Json "http://localhost:8000/ask" @{ question = "Python 3.14 지원이 추�
 - 임베딩·답변 생성 API 호출이 실패하면 502.
 - `/ask`, `/qna` 최종 응답의 `sources`에는 실제로 답변에 쓰인 근거의 메타(`source_type`/`item_type`/`title`/`url`)만 들어가고 `text` 원문은 들어가지 않는다. (`/search`는 검색 결과 확인용이라 `text`를 포함한다.)
 - `/ingest/github`: `{repo: "owner/name", months: 3(기본)}`을 받아 최근 `months`개월 내 생성/수정된 PR만 GitHub REST API로 수집(페이지네이션 처리, `updated_at` 기준 필터). PR만 수집하고 이슈·커밋 단독 수집은 하지 않는다. 각 PR은 제목+본문+리뷰/이슈 코멘트를 이어붙여 하나의 chunk(`source_type="github"`, `item_type="pr"`)로 만들고, 본문·코멘트가 없어도 제목만으로 chunk를 만든다(건너뛰지 않음). 만들어진 chunk는 기존 `add_chunks`로 그대로 임베딩·저장된다. 응답은 `{repo, indexed}`뿐이고 PR 원문은 되돌려주지 않는다. GitHub API 실패(레포 없음·rate limit 등)는 502 + GitHub가 준 메시지를 그대로 담아 반환한다.
+- `/ingest/notion`: `{pages: [{title, url, text?, item_type?(기본 "meeting")}]}`을 받아 페이지마다 `title + text`를 이어붙여 chunk(`source_type="notion"`)를 만들고 `add_chunks`로 임베딩·저장. 응답은 `{source: "notion", indexed}`. `pages`가 비어 있으면 `indexed: 0`. **BE 연동은 아직 없음** — 위 "AI 서버 구현 vs BE 연동 상태" 참고.
+- `/ingest/figma`: `{comments: [{frameName, url, text?}]}`을 받아 코멘트마다 `frameName + text`를 이어붙여 chunk(`source_type="figma"`, `item_type="design"`)를 만들고 `add_chunks`로 임베딩·저장. 응답은 `{source: "figma", indexed}`. `comments`가 비어 있으면 `indexed: 0`. **BE 연동은 아직 없음** — 위 "AI 서버 구현 vs BE 연동 상태" 참고.
