@@ -1,8 +1,32 @@
 # Onboarding RAG QnA — AI part (FastAPI)
 
+> ⚠️ **`OPENAI_API_KEY`는 절대 이 레포에 올리지 않는다.** `.env` 파일, 커밋, PR, 이슈, 스크린샷 등
+> 어떤 형태로도 커밋·푸시·업로드 금지. 키는 [BE](https://github.com/HUFSphere/BE)와 별개로
+> 팀장이 개별적으로(카톡/슬랙 DM 등) 전달한다. 새로 받은 키는 로컬 `.env`에만 적어두면 되고,
+> `.env`는 이미 `.gitignore`에 포함되어 있어 `git add`해도 커밋되지 않는다(아래 "실행 방법" 참고).
+
 GitHub·Notion·Figma 협업 기록(chunk)을 임베딩해 인메모리에 저장하고, 질문이 오면
 관련 chunk를 코사인 유사도로 검색해 `gpt-4o-mini`로 근거 기반 답변을 생성한다.
 답변은 제공된 근거 안에서만 작성되며, 근거가 없으면 모른다고 답한다(할루시네이션 방지).
+
+## BE 팀원 필독 — 이 레포(AI)도 같이 클론해야 하는 이유
+
+이 프로젝트는 [BE](https://github.com/HUFSphere/BE)(Spring Boot, linkboard)와 이 AI(FastAPI) 레포,
+총 두 개의 저장소로 나뉘어 있다. BE만 클론해서 실행하면 "source 연동 → QnA" 흐름이 전부 502/타임아웃으로
+막힌다 — BE가 소스 동기화·QnA 요청 시 내부적으로 이 AI 서버(`http://localhost:8000`)를 호출하기 때문이다.
+즉 BE 혼자서는 절반짜리 프로젝트만 돌아간다. **BE와 AI 두 레포를 각각 클론해서 로컬에서 동시에 띄워야
+전체 흐름을 테스트할 수 있다.**
+
+```
+어딘가/
+├─ BE/   (git clone https://github.com/HUFSphere/BE.git)
+└─ AI/   (git clone https://github.com/HUFSphere/AI.git)  ← 이 레포
+```
+
+두 서버는 포트가 겹치지 않는다 — BE는 `:8080`, AI는 `:8000`. BE가 AI 서버 주소를 바라보는 설정값
+(예: `application.yml`의 AI 서버 base URL)이 `http://localhost:8000`을 가리키고 있는지 확인하고,
+아래 "실행 방법"대로 AI 서버를 먼저(또는 BE와 상관없이 아무 순서로나) `:8000`에 띄워두면 BE가 정상적으로
+호출할 수 있다. 두 서버를 각각 다른 터미널 창에서 띄워두면 된다 — 하나가 다른 하나를 실행시켜주지 않는다.
 
 - 임베딩 모델: `text-embedding-3-small`
 - 생성 모델: `gpt-4o-mini`
@@ -30,7 +54,9 @@ GitHub·Notion·Figma 협업 기록(chunk)을 임베딩해 인메모리에 저�
 > 프로젝트 전용 venv를 만들어 쓴다. anaconda를 계속 쓰고 싶으면 Anaconda를 Repair/재설치해야 한다.
 
 `OPENAI_API_KEY`는 프로젝트 루트의 `.env` 파일에 적어두면 `main.py`가 시작할 때
-`python-dotenv`로 자동으로 읽는다. `.env`는 `.gitignore`에 들어있어 커밋되지 않는다.
+`python-dotenv`로 자동으로 읽는다. `.env`는 `.gitignore`에 들어있어 `git add .`를 해도 커밋되지 않지만,
+**절대 강제로(`git add -f`) 커밋하거나 다른 방식(Slack 코드블록, 스크린샷, PR 설명 등)으로도 공유하지 말 것.**
+키는 팀장이 개별적으로 전달하며, 레포에는 `.env.example`처럼 값이 비어있는 템플릿만 존재해야 한다.
 
 `GITHUB_TOKEN`(선택)도 같은 `.env`에 넣어두면 `/ingest/github`가 인증된 요청을 보낸다 —
 비공개 레포를 볼 필요는 없지만, GitHub 비인증 요청은 시간당 60회로 제한되므로 여러 레포/큰 레포를
