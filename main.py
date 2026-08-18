@@ -716,21 +716,21 @@ def link_work_items(req: LinkWorkItemsRequest) -> LinkWorkItemsResponse:
 GITHUB_API_BASE = "https://api.github.com"
 
 
-def _github_headers() -> dict[str, str]:
+def _github_headers(access_token: str | None = None) -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "hufsphere-ai-ingest",
     }
-    token = os.environ.get("GITHUB_TOKEN")
+    token = access_token or os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
-def _github_get(url: str, params: dict | None = None) -> list | dict:
+def _github_get(url: str, params: dict | None = None, access_token: str | None = None) -> list | dict:
     try:
-        resp = httpx.get(url, headers=_github_headers(), params=params, timeout=15.0)
+        resp = httpx.get(url, headers=_github_headers(access_token), params=params, timeout=15.0)
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"GitHub API 호출 실패: {e}") from e
 
@@ -746,7 +746,9 @@ def _github_get(url: str, params: dict | None = None) -> list | dict:
     return resp.json()
 
 
-def fetch_recent_pull_requests(owner: str, name: str, months: int) -> list[dict]:
+def fetch_recent_pull_requests(
+    owner: str, name: str, months: int, access_token: str | None = None
+) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=months * 30)
     pulls: list[dict] = []
     page = 1
@@ -760,6 +762,7 @@ def fetch_recent_pull_requests(owner: str, name: str, months: int) -> list[dict]
                 "per_page": 100,
                 "page": page,
             },
+            access_token=access_token,
         )
         if not data:
             break
@@ -779,11 +782,14 @@ def fetch_recent_pull_requests(owner: str, name: str, months: int) -> list[dict]
     return pulls
 
 
-def fetch_pr_comments_text(owner: str, name: str, pr_number: int) -> str:
+def fetch_pr_comments_text(
+    owner: str, name: str, pr_number: int, access_token: str | None = None
+) -> str:
     texts: list[str] = []
 
     review_comments = _github_get(
-        f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}/comments"
+        f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}/comments",
+        access_token=access_token,
     )
     for c in review_comments:
         body = (c.get("body") or "").strip()
@@ -791,7 +797,8 @@ def fetch_pr_comments_text(owner: str, name: str, pr_number: int) -> str:
             texts.append(body)
 
     issue_comments = _github_get(
-        f"{GITHUB_API_BASE}/repos/{owner}/{name}/issues/{pr_number}/comments"
+        f"{GITHUB_API_BASE}/repos/{owner}/{name}/issues/{pr_number}/comments",
+        access_token=access_token,
     )
     for c in issue_comments:
         body = (c.get("body") or "").strip()
@@ -801,10 +808,10 @@ def fetch_pr_comments_text(owner: str, name: str, pr_number: int) -> str:
     return "\n".join(texts)
 
 
-def pr_to_chunk(owner: str, name: str, pr: dict) -> Chunk:
+def pr_to_chunk(owner: str, name: str, pr: dict, access_token: str | None = None) -> Chunk:
     title = pr.get("title") or "(제목 없음)"
     body = (pr.get("body") or "").strip()
-    comments_text = fetch_pr_comments_text(owner, name, pr["number"])
+    comments_text = fetch_pr_comments_text(owner, name, pr["number"], access_token)
 
     parts = [title]
     if body:
@@ -824,6 +831,7 @@ def pr_to_chunk(owner: str, name: str, pr: dict) -> Chunk:
 class IngestGithubRequest(BaseModel):
     repo: str
     months: int = Field(default=3, ge=1)
+    access_token: str | None = None
 
     @field_validator("repo")
     @classmethod
@@ -843,8 +851,8 @@ class IngestGithubResponse(BaseModel):
 @app.post("/ingest/github", response_model=IngestGithubResponse)
 def ingest_github(req: IngestGithubRequest) -> IngestGithubResponse:
     owner, name = req.repo.split("/")
-    prs = fetch_recent_pull_requests(owner, name, req.months)
-    chunks = [pr_to_chunk(owner, name, pr) for pr in prs]
+    prs = fetch_recent_pull_requests(owner, name, req.months, req.access_token)
+    chunks = [pr_to_chunk(owner, name, pr, req.access_token) for pr in prs]
     count = add_chunks(chunks)
     return IngestGithubResponse(repo=req.repo, indexed=count)
 
