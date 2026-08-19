@@ -44,6 +44,9 @@ class Chunk(BaseModel):
     title: str
     url: str
     text: str
+    # 텍스트 추측이 아니라 실측으로 이미 확정된 status가 있으면(예: GitHub PR의 실제 merged/closed
+    # 상태) 여기 채운다. AI의 LLM 추측을 건너뛰고 이 값을 그대로 쓴다. 없으면 기존처럼 LLM이 판정한다.
+    known_status: str | None = None
 
 
 class SourceMeta(BaseModel):
@@ -607,7 +610,10 @@ def generate_work_items(lang: str) -> list[WorkItem]:
     work_items: list[WorkItem] = []
     for i, c in enumerate(chunks):
         item = by_index.get(i)
-        status = item["status"] if item and item.get("status") in WORK_ITEM_STATUSES else "todo"
+        if c.known_status in WORK_ITEM_STATUSES:
+            status = c.known_status  # 실측 상태(예: GitHub PR merged/closed)는 LLM 추측보다 우선한다
+        else:
+            status = item["status"] if item and item.get("status") in WORK_ITEM_STATUSES else "todo"
         item_type = item["item_type"] if item and item.get("item_type") in WORK_ITEM_TYPES else c.item_type
         summary_brief = (
             item["summary_brief"]
@@ -1085,6 +1091,17 @@ def fetch_pr_comments_text(
     return "\n".join(texts)
 
 
+def _github_pr_known_status(pr: dict) -> str | None:
+    # GitHub가 내려주는 실제 PR 상태. merged_at이 있으면 병합 완료가 확실하므로 done으로 확정한다.
+    # open 상태는 진행 중/리뷰 중/아직 시작 전 등 텍스트를 봐야 구분되는 애매함이 있어 LLM 추측에 맡긴다
+    # (None을 반환해서 오버라이드하지 않음).
+    if pr.get("merged_at"):
+        return "done"
+    if pr.get("state") == "closed":
+        return "blocked"
+    return None
+
+
 def pr_to_chunk(owner: str, name: str, pr: dict, access_token: str | None = None) -> Chunk:
     title = pr.get("title") or "(제목 없음)"
     body = (pr.get("body") or "").strip()
@@ -1102,6 +1119,7 @@ def pr_to_chunk(owner: str, name: str, pr: dict, access_token: str | None = None
         title=title,
         url=pr["html_url"],
         text="\n\n".join(parts),
+        known_status=_github_pr_known_status(pr),
     )
 
 
