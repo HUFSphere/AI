@@ -108,6 +108,24 @@ def search_chunks(question: str, top_k: int) -> list[tuple[float, Chunk]]:
     return [(float(scores[i]), _store[i][0]) for i in order]
 
 
+def _balanced_take(store: list[tuple[Chunk, np.ndarray]], limit: int) -> list[tuple[Chunk, np.ndarray]]:
+    """source_type별로 라운드로빈으로 최대 limit개를 뽑는다.
+    먼저 쌓인 소스가 전역 store 앞부분을 다 채워 다른 소스를 상한 밖으로 밀어내는 것을 방지한다."""
+    buckets: dict[str, list[tuple[Chunk, np.ndarray]]] = {}
+    for item in store:
+        buckets.setdefault(item[0].source_type, []).append(item)
+
+    sources = list(buckets.keys())
+    result: list[tuple[Chunk, np.ndarray]] = []
+    i = 0
+    while len(result) < limit and any(buckets.values()):
+        bucket = buckets[sources[i % len(sources)]]
+        if bucket:
+            result.append(bucket.pop(0))
+        i += 1
+    return result
+
+
 # ---- shared answer generation (used by /qna and /ask) ----------------------
 
 SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 협업 기록을 근거로 신규 합류자의 질문에 답하는 어시스턴트입니다.
@@ -318,7 +336,7 @@ def build_suggestion_material(chunks: list[Chunk]) -> str:
 
 
 def generate_suggested_questions(lang: str) -> list[str]:
-    sample = [c for c, _ in _store[:SUGGEST_CHUNK_LIMIT]]
+    sample = [c for c, _ in _balanced_take(_store, SUGGEST_CHUNK_LIMIT)]
     material = build_suggestion_material(sample)
     system_prompt = SUGGEST_SYSTEM_PROMPT_TEMPLATE.format(lang=lang)
 
@@ -439,7 +457,7 @@ class WorkItem(BaseModel):
 
 
 def generate_work_items(lang: str) -> list[WorkItem]:
-    chunks = [c for c, _ in _store[:EXTRACT_CHUNK_LIMIT]]
+    chunks = [c for c, _ in _balanced_take(_store, EXTRACT_CHUNK_LIMIT)]
     if not chunks:
         return []
 
@@ -624,7 +642,7 @@ class WorkItemLinks(BaseModel):
 
 
 def generate_work_item_links(lang: str, top_k: int) -> list[WorkItemLinks]:
-    store_slice = _store[:LINK_CHUNK_LIMIT]
+    store_slice = _balanced_take(_store, LINK_CHUNK_LIMIT)
     if len(store_slice) < 2:
         return []
 
@@ -781,7 +799,7 @@ class FeatureGroup(BaseModel):
 
 
 def generate_feature_groups(lang: str) -> list[FeatureGroup]:
-    chunks = [c for c, _ in _store[:GROUP_CHUNK_LIMIT]]
+    chunks = [c for c, _ in _balanced_take(_store, GROUP_CHUNK_LIMIT)]
     if not chunks:
         return []
 
