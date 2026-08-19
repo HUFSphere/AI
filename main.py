@@ -106,6 +106,11 @@ def add_chunks(chunks: list[Chunk]) -> int:
         return 0
     embeddings = embed_texts([c.text for c in chunks])
     for chunk, emb in zip(chunks, embeddings):
+        # url은 실제 리소스(PR/페이지/코멘트)를 고유하게 가리키므로, 같은 소스를 재동기화해서
+        # 같은 url이 다시 들어오면 예전 항목을 지우고 새로 넣는다(그냥 append만 하면 재동기화할
+        # 때마다 같은 항목이 중복 누적됨). _store가 워크스페이스로 나뉘어 있지 않아서
+        # source_type 단위로 지우면 다른 워크스페이스 데이터까지 지워질 수 있어 url 단위로만 지운다.
+        _store[:] = [item for item in _store if item[0].url != chunk.url]
         _store.append((chunk, np.array(emb, dtype=np.float32)))
     return len(chunks)
 
