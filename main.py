@@ -61,6 +61,7 @@ class QnaResponse(BaseModel):
 class QnaRequest(BaseModel):
     question: str
     lang: str
+    tone: str | None = None
     chunks: list[Chunk] = Field(default_factory=list)
 
     @field_validator("question", "lang")
@@ -128,15 +129,29 @@ def _balanced_take(store: list[tuple[Chunk, np.ndarray]], limit: int) -> list[tu
 
 # ---- shared answer generation (used by /qna and /ask) ----------------------
 
-SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 협업 기록을 근거로 신규 합류자의 질문에 답하는 어시스턴트입니다.
+SYSTEM_PROMPT_HEADER = """당신은 GitHub, Notion, Figma 등 협업 기록을 근거로 신규 합류자의 질문에 답하는 어시스턴트입니다.
 
 반드시 지켜야 할 규칙:
 1. 아래 제공된 근거(chunks) 안에 있는 내용만 사용해서 답하세요. 근거에 없는 내용은 추측하거나 지어내지 마세요.
 2. 근거만으로 답을 찾을 수 없다면 "관련 기록을 찾지 못했습니다"에 해당하는 취지의 답변을 하세요.
 3. 답변 언어: ISO 639-1 코드 "{lang}"에 해당하는 언어로만 답변을 작성하세요. 질문이나 근거가 다른 언어(예: 한국어)로 되어 있어도, 최종 answer 필드는 반드시 "{lang}" 언어로 번역해서 작성해야 합니다. 예: lang="vi"면 베트남어로만, lang="en"이면 영어로만, lang="ko"면 한국어로만 작성합니다. 다른 언어를 절대 섞지 마세요.
-4. 답변을 작성하는 데 실제로 사용한 근거의 번호를 used_indices 배열에 넣으세요. 사용하지 않은 근거는 넣지 마세요. 근거를 전혀 사용하지 못했다면 빈 배열을 반환하세요.
+4. 답변을 작성하는 데 실제로 사용한 근거의 번호를 used_indices 배열에 넣으세요. 사용하지 않은 근거는 넣지 마세요. 근거를 전혀 사용하지 못했다면 빈 배열을 반환하세요."""
+
+TONE_RULE_TEMPLATE = """
+5. 사용자가 다음과 같이 답변 스타일을 요청했습니다. 이 요청에 맞춰 답변의 상세도와 톤을 조절하세요:
+"{tone}\""""
+
+SYSTEM_PROMPT_FOOTER = """
 
 반드시 지정된 JSON 스키마로만 응답하세요."""
+
+
+def build_system_prompt(lang: str, tone: str | None) -> str:
+    prompt = SYSTEM_PROMPT_HEADER.format(lang=lang)
+    if tone and tone.strip():
+        prompt += TONE_RULE_TEMPLATE.format(tone=tone.strip())
+    return prompt + SYSTEM_PROMPT_FOOTER
+
 
 RESPONSE_JSON_SCHEMA = {
     "name": "qna_answer",
@@ -168,8 +183,8 @@ def build_user_prompt(question: str, chunks: list[Chunk], lang: str) -> str:
     return "\n".join(lines)
 
 
-def generate_answer(question: str, lang: str, chunks: list[Chunk]) -> QnaResponse:
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(lang=lang)
+def generate_answer(question: str, lang: str, chunks: list[Chunk], tone: str | None = None) -> QnaResponse:
+    system_prompt = build_system_prompt(lang, tone)
     user_prompt = build_user_prompt(question, chunks, lang)
 
     try:
@@ -209,7 +224,7 @@ def generate_answer(question: str, lang: str, chunks: list[Chunk]) -> QnaRespons
 
 @app.post("/qna", response_model=QnaResponse)
 def qna(req: QnaRequest) -> QnaResponse:
-    return generate_answer(req.question, req.lang, req.chunks)
+    return generate_answer(req.question, req.lang, req.chunks, req.tone)
 
 
 # ---- indexing / search / ask endpoints --------------------------------------
@@ -272,6 +287,7 @@ def search(req: SearchRequest) -> SearchResponse:
 class AskRequest(BaseModel):
     question: str
     lang: str
+    tone: str | None = None
 
     @field_validator("question", "lang")
     @classmethod
@@ -283,7 +299,7 @@ class AskRequest(BaseModel):
 def ask(req: AskRequest) -> QnaResponse:
     ranked = search_chunks(req.question, ASK_TOP_K)
     chunks = [c for _, c in ranked]
-    return generate_answer(req.question, req.lang, chunks)
+    return generate_answer(req.question, req.lang, chunks, req.tone)
 
 
 # ---- suggested questions -----------------------------------------------------
