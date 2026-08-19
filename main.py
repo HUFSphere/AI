@@ -711,6 +711,145 @@ def link_work_items(req: LinkWorkItemsRequest) -> LinkWorkItemsResponse:
     return LinkWorkItemsResponse(links=links)
 
 
+# ---- feature grouping ----------------------------------------------------------
+
+GROUP_CHUNK_LIMIT = 100
+GROUP_TEXT_CHARS = 300
+
+GROUP_SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 협업 기록으로 구조화된 여러 "작업(work item)"을 의미적으로 같은 "기능(feature)" 단위로 묶는 어시스턴트입니다.
+
+아래 번호가 매겨진 작업 목록이 주어집니다.
+
+반드시 지켜야 할 규칙:
+1. 각 작업의 실제 내용에 근거해서만 묶으세요. 근거 없이 기능을 지어내거나 억지로 묶지 마세요.
+2. 하나의 작업(index)은 반드시 하나의 기능에만 속해야 합니다. 여러 기능에 중복 배정하지 마세요.
+3. 의미적으로 어느 기능에도 맞지 않는 작업은 "기타"라는 이름의 기능으로 모으세요.
+4. 기능 개수는 내용에 따라 자연스럽게 정하세요(대략 2~8개). 무리하게 쪼개거나 합치지 마세요.
+5. featureName은 간결한 명사구로, featureDescription은 한 줄 설명으로 작성하세요.
+6. 반드시 ISO 639-1 언어 코드 "{lang}"에 해당하는 언어로 featureName과 featureDescription을 작성하세요. 원문이 다른 언어여도 "{lang}" 언어로 번역해서 작성해야 합니다.
+7. 입력에 주어진 각 작업의 index를 그대로 workItemIndexes에 사용하세요. 존재하지 않는 index를 만들어내지 마세요.
+
+반드시 지정된 JSON 스키마로만 응답하세요."""
+
+GROUP_RESPONSE_JSON_SCHEMA = {
+    "name": "feature_groups",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "features": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "featureName": {"type": "string"},
+                        "featureDescription": {"type": "string"},
+                        "workItemIndexes": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        },
+                    },
+                    "required": ["featureName", "featureDescription", "workItemIndexes"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["features"],
+        "additionalProperties": False,
+    },
+}
+
+
+def build_group_material(chunks: list[Chunk]) -> str:
+    lines = []
+    for i, c in enumerate(chunks):
+        snippet = c.text.strip().replace("\n", " ")
+        if len(snippet) > GROUP_TEXT_CHARS:
+            snippet = snippet[:GROUP_TEXT_CHARS] + "..."
+        lines.append(
+            f"[{i}] source_type={c.source_type} item_type={c.item_type} title={c.title}\n{snippet}"
+        )
+    return "\n".join(lines)
+
+
+class FeatureGroup(BaseModel):
+    feature_name: str = Field(alias="featureName")
+    feature_description: str = Field(alias="featureDescription")
+    work_item_indexes: list[int] = Field(alias="workItemIndexes")
+
+    model_config = {"populate_by_name": True}
+
+
+def generate_feature_groups(lang: str) -> list[FeatureGroup]:
+    chunks = [c for c, _ in _store[:GROUP_CHUNK_LIMIT]]
+    if not chunks:
+        return []
+
+    material = build_group_material(chunks)
+    system_prompt = GROUP_SYSTEM_PROMPT_TEMPLATE.format(lang=lang)
+
+    try:
+        completion = get_client().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": material},
+            ],
+            response_format={"type": "json_schema", "json_schema": GROUP_RESPONSE_JSON_SCHEMA},
+        )
+        raw = completion.choices[0].message.content
+        parsed = json.loads(raw)
+    except (OpenAIError, RuntimeError, json.JSONDecodeError, KeyError, IndexError) as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI 호출 실패: {e}") from e
+
+    n = len(chunks)
+    seen_indexes: set[int] = set()
+    groups: list[FeatureGroup] = []
+    for item in parsed.get("features", []):
+        name = item.get("featureName")
+        description = item.get("featureDescription")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(description, str):
+            description = ""
+
+        valid_indexes: list[int] = []
+        for idx in item.get("workItemIndexes", []):
+            if isinstance(idx, int) and 0 <= idx < n and idx not in seen_indexes:
+                seen_indexes.add(idx)
+                valid_indexes.append(idx)
+        if not valid_indexes:
+            continue
+
+        groups.append(
+            FeatureGroup(
+                featureName=name,
+                featureDescription=description,
+                workItemIndexes=valid_indexes,
+            )
+        )
+    return groups
+
+
+class GroupFeaturesRequest(BaseModel):
+    lang: str
+
+    @field_validator("lang")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        return _not_blank(v)
+
+
+class GroupFeaturesResponse(BaseModel):
+    features: list[FeatureGroup]
+
+
+@app.post("/group-features", response_model=GroupFeaturesResponse)
+def group_features(req: GroupFeaturesRequest) -> GroupFeaturesResponse:
+    features = generate_feature_groups(req.lang)
+    return GroupFeaturesResponse(features=features)
+
+
 # ---- GitHub PR ingestion -----------------------------------------------------
 
 GITHUB_API_BASE = "https://api.github.com"
