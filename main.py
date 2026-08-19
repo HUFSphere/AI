@@ -483,6 +483,10 @@ EXTRACT_TEXT_CHARS = 1500
 
 WORK_ITEM_STATUSES = ["todo", "in_progress", "review", "done", "blocked"]
 
+# 소스(github/notion/figma) 무관하게 통일된 분류. chunk의 item_type은 BE가 소스별로 붙인
+# 힌트일 뿐이라(예: notion은 전부 "meeting"), 실제 내용을 보고 이 목록 중 하나로 재분류한다.
+WORK_ITEM_TYPES = ["pr", "design", "meeting", "decision", "planning", "retrospective", "doc", "other"]
+
 EXTRACT_SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 협업 기록 조각(chunk)을 하나의 "작업(work item)"으로 구조화하는 어시스턴트입니다.
 
 아래 번호가 매겨진 chunk 목록이 주어집니다. 각 chunk마다 정확히 하나의 결과 항목을 만들어 반환하세요.
@@ -497,8 +501,18 @@ EXTRACT_SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 협업 �
    - done: 완료/병합/해결되었다는 근거가 있음
    - blocked: 막혀 있다는 근거가 있음
    명확한 근거가 없으면 반드시 todo로 판정하세요.
-4. 반드시 ISO 639-1 언어 코드 "{lang}"에 해당하는 언어로 summary_brief를 작성하세요. chunk 원문이 다른 언어여도 "{lang}" 언어로 번역해서 작성해야 합니다.
-5. 입력으로 주어진 chunk 각각에 대해, 그 chunk의 index를 그대로 결과의 index 필드에 넣으세요. 순서를 바꾸거나 누락하지 마세요.
+4. item_type은 아래 목록 중 하나로 판정하세요. chunk에 표시된 item_type은 소스가 붙인 힌트일 뿐이니 참고만 하고, 실제 내용을 보고 다시 판단하세요.
+   - pr: 코드 변경(Pull Request) 관련 내용
+   - design: 디자인/화면 관련 내용
+   - meeting: 회의 내용
+   - decision: 특정 사안에 대한 결정/합의 내용
+   - planning: 일정·범위 등 계획 수립 내용
+   - retrospective: 회고/리뷰 내용
+   - doc: 문서화(가이드, 명세 등) 내용
+   - other: 위 어디에도 명확히 속하지 않음
+   source_type=github인 chunk는 특별한 근거가 없으면 보통 pr입니다.
+5. 반드시 ISO 639-1 언어 코드 "{lang}"에 해당하는 언어로 summary_brief를 작성하세요. chunk 원문이 다른 언어여도 "{lang}" 언어로 번역해서 작성해야 합니다.
+6. 입력으로 주어진 chunk 각각에 대해, 그 chunk의 index를 그대로 결과의 index 필드에 넣으세요. 순서를 바꾸거나 누락하지 마세요.
 
 반드시 지정된 JSON 스키마로만 응답하세요."""
 
@@ -532,8 +546,9 @@ def build_extract_json_schema(n: int) -> dict:
                             "index": {"type": "integer"},
                             "summary_brief": {"type": "string"},
                             "status": {"type": "string", "enum": WORK_ITEM_STATUSES},
+                            "item_type": {"type": "string", "enum": WORK_ITEM_TYPES},
                         },
-                        "required": ["index", "summary_brief", "status"],
+                        "required": ["index", "summary_brief", "status", "item_type"],
                         "additionalProperties": False,
                     },
                 },
@@ -588,6 +603,7 @@ def generate_work_items(lang: str) -> list[WorkItem]:
     for i, c in enumerate(chunks):
         item = by_index.get(i)
         status = item["status"] if item and item.get("status") in WORK_ITEM_STATUSES else "todo"
+        item_type = item["item_type"] if item and item.get("item_type") in WORK_ITEM_TYPES else c.item_type
         summary_brief = (
             item["summary_brief"]
             if item and isinstance(item.get("summary_brief"), str) and item["summary_brief"].strip()
@@ -596,7 +612,7 @@ def generate_work_items(lang: str) -> list[WorkItem]:
         work_items.append(
             WorkItem(
                 sourceType=c.source_type,
-                itemType=c.item_type,
+                itemType=item_type,
                 title=c.title,
                 summaryBrief=summary_brief,
                 status=status,
