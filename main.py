@@ -1381,3 +1381,109 @@ def ingest_figma(req: IngestFigmaRequest) -> IngestSourceResponse:
     chunks = [figma_comment_to_chunk(c) for c in req.comments]
     count = add_chunks(chunks)
     return IngestSourceResponse(source="figma", indexed=count)
+
+
+# ---- tone preset translation ---------------------------------------------------
+# 톤 프리셋(concise/detailed/friendly) 라벨·설명을 ko/en 외의 임의 언어로 번역한다.
+# BE가 결과를 캐싱하므로(TonePresetTranslation) 같은 언어 요청은 두 번째부터 이 엔드포인트를
+# 다시 타지 않는다 — 여기서는 매번 실제로 번역만 수행한다.
+
+TRANSLATE_PRESET_SYSTEM_PROMPT = """당신은 UI 문구를 번역하는 전문 번역가입니다.
+
+아래에 프리셋 목록이 JSON으로 주어집니다. 각 프리셋의 presetKey는 절대 바꾸지 말고 그대로
+반환하고, label과 description만 ISO 639-1 언어 코드 "{lang}"에 해당하는 언어로 자연스럽게
+번역하세요.
+
+반드시 지켜야 할 규칙:
+1. presetKey는 입력에 있는 값을 정확히 그대로 반환하세요(번역하거나 바꾸지 마세요).
+2. label은 짧게(원문과 비슷한 길이로), description은 원문의 의미를 그대로 살려서 번역하세요.
+3. 입력에 없는 presetKey를 만들어내지 말고, 입력의 모든 presetKey에 대해 빠짐없이 응답하세요.
+
+반드시 지정된 JSON 스키마로만 응답하세요."""
+
+TRANSLATE_PRESET_JSON_SCHEMA = {
+    "name": "translated_tone_presets",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "presets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "presetKey": {"type": "string"},
+                        "label": {"type": "string"},
+                        "description": {"type": "string"},
+                    },
+                    "required": ["presetKey", "label", "description"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["presets"],
+        "additionalProperties": False,
+    },
+}
+
+
+class TonePresetItem(BaseModel):
+    preset_key: str = Field(alias="presetKey")
+    label: str
+    description: str
+
+    model_config = {"populate_by_name": True}
+
+
+class TranslateTonePresetsRequest(BaseModel):
+    lang: str
+    presets: list[TonePresetItem]
+
+    @field_validator("lang")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        return _not_blank(v)
+
+
+class TranslateTonePresetsResponse(BaseModel):
+    presets: list[TonePresetItem]
+
+
+@app.post("/translate-tone-presets", response_model=TranslateTonePresetsResponse)
+def translate_tone_presets(req: TranslateTonePresetsRequest) -> TranslateTonePresetsResponse:
+    if not req.presets:
+        return TranslateTonePresetsResponse(presets=[])
+
+    source = {p.preset_key: p for p in req.presets}
+    payload = json.dumps(
+        [{"presetKey": p.preset_key, "label": p.label, "description": p.description} for p in req.presets],
+        ensure_ascii=False,
+    )
+    system_prompt = TRANSLATE_PRESET_SYSTEM_PROMPT.format(lang=req.lang)
+
+    try:
+        completion = get_client().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": payload},
+            ],
+            response_format={"type": "json_schema", "json_schema": TRANSLATE_PRESET_JSON_SCHEMA},
+        )
+        raw = completion.choices[0].message.content
+        parsed = json.loads(raw)
+    except (OpenAIError, RuntimeError, json.JSONDecodeError, KeyError, IndexError) as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI 호출 실패: {e}") from e
+
+    # LLM이 presetKey를 바꾸거나 빠뜨렸을 수 있으니, 우리가 보낸 presetKey 집합에 실제로
+    # 있는 것만 신뢰하고 나머지는 원문(source)으로 대체해서 항상 전체 목록이 채워지게 한다.
+    translated_by_key: dict[str, TonePresetItem] = {}
+    for item in parsed.get("presets", []):
+        key = item.get("presetKey")
+        label = item.get("label")
+        description = item.get("description")
+        if key in source and isinstance(label, str) and label.strip() and isinstance(description, str) and description.strip():
+            translated_by_key[key] = TonePresetItem(presetKey=key, label=label.strip(), description=description.strip())
+
+    results = [translated_by_key.get(p.preset_key, p) for p in req.presets]
+    return TranslateTonePresetsResponse(presets=results)
