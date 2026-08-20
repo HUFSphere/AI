@@ -994,6 +994,153 @@ def group_features(req: GroupFeaturesRequest) -> GroupFeaturesResponse:
     return GroupFeaturesResponse(features=features)
 
 
+# ---- team norm extraction ------------------------------------------------------
+
+NORM_CHUNK_LIMIT = 100
+NORM_TEXT_CHARS = 300
+NORM_MAX_COUNT = 5
+NORM_DEFAULT_CATEGORIES = ["COMMUNICATION", "CODE_REVIEW", "MEETING", "CONVENTION"]
+
+NORM_SYSTEM_PROMPT_TEMPLATE = """당신은 GitHub, Notion, Figma 등 팀의 협업 기록을 종합 분석해서, 이 팀에서 실제로 반복되고 있는
+업무 관행(team norm)을 찾아내는 분석가입니다.
+
+아래 번호가 매겨진 기록(chunk) 목록이 주어집니다.
+
+반드시 지켜야 할 규칙:
+1. 관행은 추측이나 일반론이 아니라, 주어진 기록 여러 건에 걸쳐 실제로 반복 관찰되는 구체적인 패턴이어야
+   합니다. 예: "최근 PR 12건 중 10건이 리뷰어 2명의 승인을 받은 뒤 머지되었습니다."
+2. 근거가 1~2건뿐이거나 반복성이 없는 내용은 관행으로 뽑지 마세요. 명확한 반복 패턴만 인정합니다.
+3. 각 관행은 정확히 1문장으로, 가능하면 구체적인 수치(건수·비율 등)를 포함해서 작성하세요.
+4. 각 관행마다, 그 패턴을 가장 잘 보여주는 기록 하나를 evidence_index로 지정하세요. 반드시 아래 목록에
+   실제로 있는 index만 사용하고, 없는 index를 만들어내지 마세요.
+5. category는 다음 중 가장 가까운 것을 고르세요: COMMUNICATION, CODE_REVIEW, MEETING, CONVENTION.
+   어디에도 해당하지 않으면 짧은 새 카테고리명을 직접 지어도 됩니다.
+6. 반드시 ISO 639-1 언어 코드 "{lang}"에 해당하는 언어로 content를 작성하세요. 기록 원문이 다른 언어여도
+   "{lang}" 언어로 작성해야 합니다.
+7. 명확한 관행이 없으면 빈 배열을 반환하세요. 개수를 억지로 채우지 마세요. 있더라도 최대 {max_count}개까지만
+   반환하세요.
+
+반드시 지정된 JSON 스키마로만 응답하세요."""
+
+NORM_RESPONSE_JSON_SCHEMA = {
+    "name": "team_norms",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "norms": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                        "content": {"type": "string"},
+                        "evidence_index": {"type": "integer"},
+                    },
+                    "required": ["category", "content", "evidence_index"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["norms"],
+        "additionalProperties": False,
+    },
+}
+
+
+def build_norm_material(chunks: list[Chunk]) -> str:
+    lines = []
+    for i, c in enumerate(chunks):
+        snippet = c.text.strip().replace("\n", " ")
+        if len(snippet) > NORM_TEXT_CHARS:
+            snippet = snippet[:NORM_TEXT_CHARS] + "..."
+        lines.append(
+            f"[{i}] source_type={c.source_type} item_type={c.item_type} title={c.title}\n{snippet}"
+        )
+    return "\n".join(lines)
+
+
+class TeamNormCandidate(BaseModel):
+    category: str
+    content: str
+    evidence_url: str = Field(alias="evidenceUrl")
+    evidence_title: str = Field(alias="evidenceTitle")
+    evidence_source_type: str = Field(alias="evidenceSourceType")
+
+    model_config = {"populate_by_name": True}
+
+
+def generate_team_norms(lang: str) -> list[TeamNormCandidate]:
+    chunks = [c for c, _ in _balanced_take(_store, NORM_CHUNK_LIMIT)]
+    if not chunks:
+        return []
+
+    material = build_norm_material(chunks)
+    system_prompt = NORM_SYSTEM_PROMPT_TEMPLATE.format(lang=lang, max_count=NORM_MAX_COUNT)
+
+    try:
+        completion = get_client().chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": material},
+            ],
+            response_format={"type": "json_schema", "json_schema": NORM_RESPONSE_JSON_SCHEMA},
+        )
+        raw = completion.choices[0].message.content
+        parsed = json.loads(raw)
+    except (OpenAIError, RuntimeError, json.JSONDecodeError, KeyError, IndexError) as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI 호출 실패: {e}") from e
+
+    n = len(chunks)
+    norms: list[TeamNormCandidate] = []
+    for item in parsed.get("norms", [])[:NORM_MAX_COUNT]:
+        category = item.get("category")
+        content = item.get("content")
+        evidence_index = item.get("evidence_index")
+        if not isinstance(category, str) or not category.strip():
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        # evidence_index는 반드시 우리가 넘긴 chunks 범위 안에서만 실제 url을 조회한다.
+        # LLM이 만들어낸 url 문자열을 그대로 믿지 않고, 검증된 index로만 원본 chunk를 되찾는다.
+        if not isinstance(evidence_index, int) or not (0 <= evidence_index < n):
+            continue
+
+        evidence = chunks[evidence_index]
+        norms.append(
+            TeamNormCandidate(
+                category=category.strip(),
+                content=content.strip(),
+                evidenceUrl=evidence.url,
+                evidenceTitle=evidence.title,
+                evidenceSourceType=evidence.source_type,
+            )
+        )
+    return norms
+
+
+class ExtractTeamNormsRequest(BaseModel):
+    lang: str
+
+    @field_validator("lang")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        return _not_blank(v)
+
+
+class ExtractTeamNormsResponse(BaseModel):
+    team_norms: list[TeamNormCandidate] = Field(alias="teamNorms")
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/extract-team-norms", response_model=ExtractTeamNormsResponse)
+def extract_team_norms(req: ExtractTeamNormsRequest) -> ExtractTeamNormsResponse:
+    norms = generate_team_norms(req.lang)
+    return ExtractTeamNormsResponse(teamNorms=norms)
+
+
 # ---- GitHub PR ingestion -----------------------------------------------------
 
 GITHUB_API_BASE = "https://api.github.com"

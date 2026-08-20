@@ -45,16 +45,19 @@ GitHub·Notion·Figma 협업 기록(chunk)을 임베딩해 인메모리에 저�
 | 5 | `POST /suggest-questions` | 저장된 chunk 전체를 재료로 신규 합류자가 물어볼 만한 질문 3개 생성 (lang만 받음) |
 | 6 | `POST /extract-work-items` | 저장된 chunk(최대 100개)를 요약(`summaryBrief`)·상태(`status`)를 갖춘 work item으로 1회 호출 배치 구조화 |
 | 7 | `POST /link-work-items` | 임베딩 코사인 유사도(임계값 0.4)로 후보를 추린 뒤 실제 관련 있는 work item끼리만 연결 근거(`linkReason`) 생성 |
-| 8 | `POST /ingest/github` | 공개 GitHub 레포의 최근 PR을 긁어와 chunk로 만들어 `/index`와 동일하게 저장 |
-| 9 | `POST /ingest/notion` | Notion 페이지 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
-| 10 | `POST /ingest/figma` | Figma 코멘트 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
+| 8 | `POST /group-features` | 저장된 chunk(최대 100개)를 의미적으로 같은 기능(feature) 단위로 묶음 |
+| 9 | `POST /extract-team-norms` | 저장된 chunk(최대 100개)를 종합 분석해서 반복 관찰되는 팀 관행을 최대 5개까지 1문장 + 근거 링크 1개 형태로 추출 |
+| 10 | `POST /ingest/github` | 공개 GitHub 레포의 최근 PR을 긁어와 chunk로 만들어 `/index`와 동일하게 저장 |
+| 11 | `POST /ingest/notion` | Notion 페이지 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
+| 12 | `POST /ingest/figma` | Figma 코멘트 목록을 받아 chunk로 만들어 `/index`와 동일하게 저장 |
 
 `/ask`와 `/qna`는 같은 답변 생성 로직(`generate_answer`)을 공유한다 — 근거 안에서만 답하고,
 없으면 모른다고 `lang`으로 답하며, 실제로 사용한 근거만 `sources`로 반환하는 규칙은 동일하다.
 
-`/suggest-questions`, `/extract-work-items`, `/link-work-items`는 DB에 아무것도 저장하지 않고 JSON만
-반환한다 — 저장은 BE 몫이다. `/extract-work-items`와 `/link-work-items`는 여러 chunk/work item을
-모델 호출 1회로 배치 처리한다.
+`/suggest-questions`, `/extract-work-items`, `/link-work-items`, `/group-features`, `/extract-team-norms`는
+DB에 아무것도 저장하지 않고 JSON만 반환한다 — 저장은 BE 몫이다. 전부 여러 chunk를 모델 호출 1회로
+배치 처리한다. `/extract-team-norms`는 LLM이 만든 URL을 그대로 믿지 않고, 검증된 `evidence_index`로만
+원본 chunk의 실제 url을 되찾아 응답한다(다른 index 기반 엔드포인트와 동일한 안전장치).
 
 > **AI 서버 구현 ↔ BE 연동 상태.** GitHub·Notion·Figma 세 소스 모두 BE↔AI 전체 흐름(크롤링 →
 > `/ingest/*` → QnA/작업 구조화)이 실제로 연동·검증되어 있다.
